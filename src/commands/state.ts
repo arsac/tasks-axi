@@ -22,20 +22,9 @@ import {
 import { AxiError, notFound } from "../errors.js";
 import { formatCountLine } from "../format.js";
 import { validateDependencyId } from "../id.js";
-import type {
-  Dep,
-  Hold,
-  HoldKind,
-  Task,
-  TaskInput,
-  TaskLink,
-  TaskPatch,
-} from "../model.js";
+import type { Dep, Hold, HoldKind, TaskLink, TaskPatch } from "../model.js";
 import { HOLD_KINDS } from "../model.js";
-import {
-  PUBLIC_FOLLOWUP_KIND,
-  clonePublicFollowup,
-} from "../public-followup.js";
+import { PUBLIC_FOLLOWUP_KIND } from "../public-followup.js";
 import type { Store } from "../store.js";
 import { getSuggestions } from "../suggestions.js";
 import { renderHelp, renderOutput } from "../toon.js";
@@ -654,28 +643,6 @@ function resolveBacklogTarget(to: string): string {
   return base;
 }
 
-function taskToInput(task: Task): TaskInput {
-  const input: TaskInput = {
-    id: task.id,
-    title: task.title,
-    state: task.state,
-    deps: task.deps.map((dep) => ({ ...dep })),
-    links: task.links.map((link) => ({ ...link })),
-  };
-  if (task.kind) input.kind = task.kind;
-  if (task.repo) input.repo = task.repo;
-  if (task.body) input.body = task.body;
-  if (task.hold) input.hold = { ...task.hold };
-  if (task.priority !== undefined) input.priority = task.priority;
-  input.created = task.created ?? null;
-  if (task.closed) input.closed = task.closed;
-  if (task.public_followup) {
-    input.public_followup = clonePublicFollowup(task.public_followup);
-  }
-  if (task.meta) input.meta = { ...task.meta };
-  return input;
-}
-
 export async function mvCommand(
   rawArgs: string[],
   context?: TasksContext,
@@ -700,18 +667,21 @@ export async function mvCommand(
   const ids = [...new Set(positionals.map((p) => requireId(p, "id")))];
 
   const targetPath = resolveBacklogTarget(to);
-  if (resolve(targetPath) === resolve(config.path)) {
+  const sourcePath =
+    store instanceof MarkdownStore || config.pathConfigured
+      ? config.path
+      : undefined;
+  if (sourcePath !== undefined && resolve(targetPath) === resolve(sourcePath)) {
     throw new AxiError(
       "--to resolves to the current backlog",
       "VALIDATION_ERROR",
     );
   }
 
-  const tasks: Task[] = [];
   for (const id of ids) {
-    const task = await store.get(id);
-    if (!task) throw notFound(id, { globals: context?.suggestionGlobals });
-    tasks.push(task);
+    if (!(await store.get(id))) {
+      throw notFound(id, { globals: context?.suggestionGlobals });
+    }
   }
 
   const target = new MarkdownStore({ path: targetPath });
@@ -726,9 +696,13 @@ export async function mvCommand(
 
   if (store instanceof MarkdownStore) {
     await store.moveManyTo(ids, target);
+  } else if (ids.length === 1 && store.moveTo) {
+    await store.moveTo(ids[0], target);
   } else if (ids.length === 1) {
-    await target.create(taskToInput(tasks[0]));
-    await store.remove(ids[0]);
+    throw new AxiError(
+      `The ${store.capabilities().backend} backend cannot move tasks`,
+      "UNSUPPORTED",
+    );
   } else {
     throw new AxiError(
       "Moving multiple tasks at once requires the markdown backend",
@@ -746,7 +720,7 @@ export async function mvCommand(
       ok: true,
       action: "mv",
       ...(single ? { id: ids[0] } : { ids }),
-      from: config.path,
+      ...(sourcePath !== undefined ? { from: sourcePath } : {}),
       to: targetPath,
     },
     suggestions: getSuggestions({

@@ -10,7 +10,7 @@ import {
 } from "../args.js";
 import { takeBody } from "../body.js";
 import { deriveLinks, extractTags } from "../backends/markdown-grammar.js";
-import { PR_URL_EXPECTED } from "../pr-url.js";
+import { LINK_EXPECTED } from "../backends/normalize.js";
 import { renderMutation, stateLabel, taskToJson } from "../confirm.js";
 import { requireCtx, type TasksContext } from "../context.js";
 import { blockedIds, heldTasks } from "../derive.js";
@@ -48,7 +48,8 @@ aliases: create
 flags:
   --kind <ship|scout|docs|...>, --repo <name>, --body <text> or --body-file <path>
   --start (place in In flight) | --queue (place in Queued, default)
-  --blocked-by <id> (repeatable, must exist), --pr <url>, --report <path>, --priority <0-4>
+  --blocked-by <id> (repeatable, must exist), --pr <url>, --issue <url>, --report <path>
+  --priority <0-4>
   --mint [--prefix <p>]   mint a slug-xx id from the title instead of passing one
   --json   print the resulting task as a JSON object
 examples:
@@ -78,7 +79,8 @@ aliases: edit
 flags:
   --title <text>, --body <text> or --body-file <path>
   --archive-body   with --body/--body-file, archive the previous body
-  --repo <name>, --kind <name>, --priority <0-4>, --pr <url>, --report <path>
+  --repo <name>, --kind <name>, --priority <0-4>
+  --pr <url>, --issue <url>, --report <path>
   --json   print the resulting task as a JSON object
 examples:
   tasks-axi show nm-release-validation --full
@@ -130,7 +132,7 @@ function requireSafeTagFlagValue(
 }
 
 function requireTypedLinkUrl(
-  flag: "--pr" | "--report",
+  flag: "--pr" | "--issue" | "--report",
   kind: TaskLink["kind"],
   value: string | undefined,
 ): string | undefined {
@@ -141,25 +143,32 @@ function requireTypedLinkUrl(
       `Pass ${flag}=... without line breaks`,
     ]);
   }
-  // pr URLs must already be canonical; padded input is rejected, not trimmed
-  const url = kind === "pr" ? checked : checked.trim();
+  // pr and issue URLs must already be canonical; padded input is rejected
+  const url = kind === "pr" || kind === "issue" ? checked : checked.trim();
   if (
     !deriveLinks(url).some((link) => link.kind === kind && link.url === url)
   ) {
-    const expected =
-      kind === "pr" ? PR_URL_EXPECTED : "a data/<id>/report.md path";
-    throw new AxiError(`${flag} must be ${expected}`, "VALIDATION_ERROR");
+    throw new AxiError(
+      `${flag} must be ${LINK_EXPECTED[kind]}`,
+      "VALIDATION_ERROR",
+    );
   }
   return url;
 }
 
-function parseLinks(pr?: string, report?: string): TaskLink[] {
+function parseLinks(
+  pr: string | undefined,
+  issue: string | undefined,
+  report: string | undefined,
+): TaskLink[] {
   const links: TaskLink[] = [];
-  const checkedPr = requireTypedLinkUrl("--pr", "pr", pr);
-  const checkedReport = requireTypedLinkUrl("--report", "report", report);
-  if (checkedPr !== undefined) links.push({ kind: "pr", url: checkedPr });
-  if (checkedReport !== undefined) {
-    links.push({ kind: "report", url: checkedReport });
+  for (const [flag, kind, value] of [
+    ["--pr", "pr", pr],
+    ["--issue", "issue", issue],
+    ["--report", "report", report],
+  ] as const) {
+    const url = requireTypedLinkUrl(flag, kind, value);
+    if (url !== undefined) links.push({ kind, url });
   }
   return links;
 }
@@ -235,6 +244,7 @@ export async function addCommand(
   const repo = requireSafeTagFlagValue("--repo", takeFlag(args, "--repo"));
   const body = requireNonEmptyFlagValue("--body", takeBody(args));
   const pr = takeFlag(args, "--pr");
+  const issue = takeFlag(args, "--issue");
   const report = takeFlag(args, "--report");
   const priority = parsePriority(takeFlag(args, "--priority"));
   const deps = parseDeps(args);
@@ -288,7 +298,7 @@ export async function addCommand(
     throw new AxiError("A task cannot block itself", "VALIDATION_ERROR");
   }
   await requireExistingBlockers(store, deps);
-  const links = parseLinks(pr, report);
+  const links = parseLinks(pr, issue, report);
 
   if (!mint) {
     const existing = await store.get(id);
@@ -507,6 +517,7 @@ export async function updateCommand(
   );
   const priority = parsePriority(takeFlag(args, "--priority"));
   const pr = takeFlag(args, "--pr");
+  const issue = takeFlag(args, "--issue");
   const report = takeFlag(args, "--report");
   const positionals = requirePositionals(
     args,
@@ -544,7 +555,7 @@ export async function updateCommand(
     patch.kind = kind;
   }
   if (priority !== undefined) patch.priority = priority;
-  const addLinks = parseLinks(pr, report);
+  const addLinks = parseLinks(pr, issue, report);
   if (addLinks.length > 0) patch.addLinks = addLinks;
 
   if (Object.keys(patch).length === 0) {

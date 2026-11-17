@@ -339,6 +339,26 @@ describe("markdown grammar", () => {
       ]);
     });
 
+    it("derives GitHub and Forgejo issue URLs as issue links", () => {
+      expect(
+        deriveLinks(
+          "tracks https://github.com/o/r/issues/7 and https://forgejo.samesies.gay/o/r/issues/8",
+        ),
+      ).toEqual([
+        { kind: "issue", url: "https://github.com/o/r/issues/7" },
+        { kind: "issue", url: "https://forgejo.samesies.gay/o/r/issues/8" },
+      ]);
+    });
+
+    it("keeps non-canonical issue-ish URLs as doc links", () => {
+      for (const url of [
+        "https://github.com/o/r/issue/7",
+        "https://github.com/o/r/issues/7#issuecomment-1",
+      ]) {
+        expect(deriveLinks(`see ${url}`)).toEqual([{ kind: "doc", url }]);
+      }
+    });
+
     it("keeps non-canonical PR-ish URLs as doc links, never pr", () => {
       for (const url of [
         "https://forgejo.samesies.gay/eve/orchalycious/pull/39",

@@ -1,3 +1,4 @@
+import type { MarkdownStore } from "./backends/markdown.js";
 import type { PublicFollowupMutation } from "./public-followup.js";
 import type {
   Dep,
@@ -81,4 +82,6 @@ export interface Store {
   prune?(options: PruneOptions): Promise<PruneResult>;
   /** Normalize the persisted view (markdown: rewrite every item canonically). */
   render?(): Promise<number>;
+  /** Move one task into a markdown backlog, all or nothing (`mv`). */
+  moveTo?(id: string, target: MarkdownStore): Promise<Task>;
 }

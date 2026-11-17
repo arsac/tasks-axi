@@ -13,6 +13,7 @@ import {
   unholdCommand,
 } from "../../src/commands/state.js";
 import { listCommand } from "../../src/commands/crud.js";
+import type { Store } from "../../src/store.js";
 import { makeBacklog } from "../helpers.js";
 
 describe("state commands", () => {
@@ -861,12 +862,28 @@ describe("state commands", () => {
           ok: true,
           action: "mv",
           id: "cert-cleanup",
+          from: b.path,
           to: target.path,
         });
         expect(readFileSync(target.path, "utf8")).toContain("cert-cleanup");
       } finally {
         b.cleanup();
         target.cleanup();
+      }
+    });
+
+    it("refuses a --to that resolves to the current markdown backlog", async () => {
+      const b = makeBacklog();
+      try {
+        await expect(
+          mvCommand(["cert-cleanup", "--to", b.path], b.ctx),
+        ).rejects.toMatchObject({
+          code: "VALIDATION_ERROR",
+          message: "--to resolves to the current backlog",
+        });
+        expect(b.read()).toContain("cert-cleanup");
+      } finally {
+        b.cleanup();
       }
     });
 
@@ -917,6 +934,36 @@ describe("state commands", () => {
         expect(edited).toBe(true);
         expect(readFileSync(target.path, "utf8")).toContain("fresh title");
         expect(readFileSync(target.path, "utf8")).not.toContain("stale title");
+      } finally {
+        b.cleanup();
+        target.cleanup();
+      }
+    });
+
+    it("refuses a move from a backend that cannot move tasks", async () => {
+      const b = makeBacklog();
+      const target = makeBacklog("# Backlog\n\n## Queued\n\n## Done\n");
+      const source: Store = {
+        capabilities: () => ({ ...b.store.capabilities(), backend: "other" }),
+        create: b.store.create.bind(b.store),
+        get: b.store.get.bind(b.store),
+        update: b.store.update.bind(b.store),
+        remove: b.store.remove.bind(b.store),
+        list: b.store.list.bind(b.store),
+        transition: b.store.transition.bind(b.store),
+        addDep: b.store.addDep.bind(b.store),
+        removeDep: b.store.removeDep.bind(b.store),
+        updatePublicFollowup: b.store.updatePublicFollowup.bind(b.store),
+      };
+      try {
+        await expect(
+          mvCommand(["cert-cleanup", "--to", target.path], {
+            ...b.ctx,
+            store: source,
+          }),
+        ).rejects.toMatchObject({ code: "UNSUPPORTED" });
+        expect(b.read()).toContain("cert-cleanup");
+        expect(readFileSync(target.path, "utf8")).not.toContain("cert-cleanup");
       } finally {
         b.cleanup();
         target.cleanup();

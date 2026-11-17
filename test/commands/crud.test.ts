@@ -348,6 +348,53 @@ describe("crud commands", () => {
       }
     });
 
+    it("links an issue with --issue", async () => {
+      const b = makeBacklog();
+      try {
+        const out = await addCommand(
+          [
+            "new-q1",
+            "issue work",
+            "--issue",
+            "https://forgejo.samesies.gay/o/r/issues/12",
+            "--json",
+          ],
+          b.ctx,
+        );
+        expect(JSON.parse(out).task.links).toEqual([
+          { kind: "issue", url: "https://forgejo.samesies.gay/o/r/issues/12" },
+        ]);
+        expect(b.read()).toContain(
+          "new-q1 - issue work https://forgejo.samesies.gay/o/r/issues/12",
+        );
+      } finally {
+        b.cleanup();
+      }
+    });
+
+    it("rejects --issue with a URL that is not an issue", async () => {
+      const b = makeBacklog();
+      try {
+        await expect(
+          addCommand(
+            [
+              "new-q1",
+              "issue work",
+              "--issue",
+              "https://github.com/o/r/pull/9",
+            ],
+            b.ctx,
+          ),
+        ).rejects.toMatchObject({
+          code: "VALIDATION_ERROR",
+          message: expect.stringContaining("--issue must be"),
+        });
+        expect(b.read()).not.toContain("new-q1");
+      } finally {
+        b.cleanup();
+      }
+    });
+
     it("rejects an empty link flag before creating a task", async () => {
       const b = makeBacklog();
       try {
@@ -834,6 +881,21 @@ describe("crud commands", () => {
         ).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
         expect(b.read()).toContain(
           "- [ ] cert-cleanup - port the post-upload cert pruning",
+        );
+      } finally {
+        b.cleanup();
+      }
+    });
+
+    it("adds an issue link with --issue", async () => {
+      const b = makeBacklog();
+      try {
+        await updateCommand(
+          ["cert-cleanup", "--issue", "https://github.com/o/r/issues/5"],
+          b.ctx,
+        );
+        expect(b.read()).toContain(
+          "never touch distribution certs. https://github.com/o/r/issues/5 (repo: monorepo)",
         );
       } finally {
         b.cleanup();
