@@ -103,7 +103,7 @@ function errno(error: unknown): string {
     : "UNKNOWN";
 }
 
-function taskToInput(task: Task): TaskInput {
+export function taskToInput(task: Task): TaskInput {
   const input: TaskInput = {
     id: task.id,
     title: task.title,
@@ -414,46 +414,71 @@ export class MarkdownStore implements Store {
   // -------------------------------------------------------------------------
 
   async create(input: TaskInput): Promise<Task> {
-    return withLock(this.path, () => {
-      if (input.kind === PUBLIC_FOLLOWUP_KIND) {
-        const value = input.public_followup
-          ? normalizePublicFollowup(input.public_followup)
-          : undefined;
-        if (
-          !value ||
-          value.revision !== 1 ||
-          value.delivery.state !== "intent" ||
-          value.work_relations.length !== 0 ||
-          input.title.trim() !== value.request.public_safe_summary ||
-          input.body !== undefined ||
-          (input.links?.length ?? 0) > 0 ||
-          (input.state !== undefined && input.state !== "queued")
-        ) {
-          throw new AxiError(
-            "New public-followup must start as a revision 1 queued intent",
-            "VALIDATION_ERROR",
-            ["Use `tasks-axi public-followup add ...`"],
-          );
+    return withLock(this.path, () => this.createLocked(input));
+  }
+
+  /**
+   * Insert `input` and run `commit` while holding this backlog's lock, undoing
+   * the insert if `commit` throws. Lets another store move a task in with no
+   * window in which the new copy can gain a dependent before the source copy
+   * is gone.
+   */
+  async receive(input: TaskInput, commit: () => Promise<void>): Promise<Task> {
+    return withLock(this.path, async () => {
+      const task = this.createLocked(input);
+      try {
+        await commit();
+      } catch (error) {
+        try {
+          this.removeCreatedTask(input.id);
+        } catch (rollbackError) {
+          throw this.partialMoveError(input.id, error, rollbackError);
         }
+        throw error;
       }
-      const loaded = this.loadForUpdate();
-      const { doc } = loaded;
-      this.ensureSections(doc);
-      if (this.findEntry(doc, input.id)) {
-        throw new AxiError(`Task "${input.id}" already exists`, "CONFLICT");
-      }
-      const task = this.taskFromInput(input);
-      this.requireExistingDeps(doc, task.deps);
-      const entry: TaskEntry = { kind: "task", task, raw: [], dirty: true };
-      // New in_flight work goes to the top; queued work appends to the bottom.
-      this.insert(
-        this.section(doc, task.state),
-        entry,
-        task.state === "in_flight",
-      );
-      this.persist(loaded);
       return task;
     });
+  }
+
+  private createLocked(input: TaskInput): Task {
+    if (input.kind === PUBLIC_FOLLOWUP_KIND) {
+      const value = input.public_followup
+        ? normalizePublicFollowup(input.public_followup)
+        : undefined;
+      if (
+        !value ||
+        value.revision !== 1 ||
+        value.delivery.state !== "intent" ||
+        value.work_relations.length !== 0 ||
+        input.title.trim() !== value.request.public_safe_summary ||
+        input.body !== undefined ||
+        (input.links?.length ?? 0) > 0 ||
+        (input.state !== undefined && input.state !== "queued")
+      ) {
+        throw new AxiError(
+          "New public-followup must start as a revision 1 queued intent",
+          "VALIDATION_ERROR",
+          ["Use `tasks-axi public-followup add ...`"],
+        );
+      }
+    }
+    const loaded = this.loadForUpdate();
+    const { doc } = loaded;
+    this.ensureSections(doc);
+    if (this.findEntry(doc, input.id)) {
+      throw new AxiError(`Task "${input.id}" already exists`, "CONFLICT");
+    }
+    const task = this.taskFromInput(input);
+    this.requireExistingDeps(doc, task.deps);
+    const entry: TaskEntry = { kind: "task", task, raw: [], dirty: true };
+    // New in_flight work goes to the top; queued work appends to the bottom.
+    this.insert(
+      this.section(doc, task.state),
+      entry,
+      task.state === "in_flight",
+    );
+    this.persist(loaded);
+    return task;
   }
 
   async update(id: string, patch: TaskPatch): Promise<TaskUpdateResult> {

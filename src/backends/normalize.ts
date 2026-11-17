@@ -1,8 +1,8 @@
 import { AxiError } from "../errors.js";
 import { validateDependencyId } from "../id.js";
-import type { Dep, Hold, TaskLink } from "../model.js";
+import type { Dep, Hold, LinkKind, TaskLink } from "../model.js";
 import { HOLD_KINDS } from "../model.js";
-import { PR_URL_EXPECTED } from "../pr-url.js";
+import { ISSUE_URL_EXPECTED, PR_URL_EXPECTED } from "../pr-url.js";
 import { deriveLinks, extractTags } from "./markdown-grammar.js";
 
 /**
@@ -61,24 +61,27 @@ function normalizeLinkUrl(url: string): string {
   return trimmed;
 }
 
+/** What each typed link must look like, for validation errors. */
+export const LINK_EXPECTED: Record<LinkKind, string> = {
+  pr: PR_URL_EXPECTED,
+  issue: ISSUE_URL_EXPECTED,
+  report: "a data/<id>/report.md path",
+  doc: "an http(s) URL",
+};
+
 export function normalizeTypedLink(link: TaskLink): TaskLink {
   const normalized = normalizeLinkUrl(link.url);
-  // pr URLs must already be canonical; padded input is rejected, not trimmed
-  const url = link.kind === "pr" ? link.url : normalized;
+  // pr and issue URLs must already be canonical; padded input is rejected
+  const url =
+    link.kind === "pr" || link.kind === "issue" ? link.url : normalized;
   const derived = deriveLinks(url);
   if (
     !derived.some(
       (candidate) => candidate.kind === link.kind && candidate.url === url,
     )
   ) {
-    const expected =
-      link.kind === "pr"
-        ? PR_URL_EXPECTED
-        : link.kind === "report"
-          ? "a data/<id>/report.md path"
-          : "an http(s) URL";
     throw new AxiError(
-      `Task ${link.kind} link must be ${expected}`,
+      `Task ${link.kind} link must be ${LINK_EXPECTED[link.kind]}`,
       "VALIDATION_ERROR",
     );
   }

@@ -9,9 +9,14 @@ import {
   type TempBeadsBacklog,
 } from "../beads-helpers.js";
 import { BeadsStore } from "../../src/backends/beads.js";
+import { MarkdownStore } from "../../src/backends/markdown.js";
+import { mvCommand } from "../../src/commands/state.js";
+import { isLocked, withLock } from "../../src/backends/lock.js";
 import { execFileSync } from "node:child_process";
 import {
   chmodSync,
+  existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
@@ -120,6 +125,23 @@ describe.skipIf(!BD_AVAILABLE)("BeadsStore CRUD", () => {
     bl = makeBeadsBacklog();
   }, HOOK_TIMEOUT);
   afterAll(() => bl.cleanup());
+
+  it(
+    "round-trips an issue link through the title",
+    async () => {
+      const url = "https://forgejo.samesies.gay/o/r/issues/12";
+      await bl.store.create({
+        id: "issue-i1",
+        title: "fix the redirect",
+        links: [{ kind: "issue", url }],
+      });
+      const fresh = new BeadsStore({ dir: bl.dir, now: () => "2026-07-01" });
+      const task = await fresh.get("issue-i1");
+      expect(task?.title).toBe(`fix the redirect ${url}`);
+      expect(task?.links).toEqual([{ kind: "issue", url }]);
+    },
+    IT_TIMEOUT,
+  );
 
   it(
     "create round-trips every field and writes the mirror",
@@ -683,7 +705,7 @@ describe.skipIf(!BD_AVAILABLE)("BeadsStore mutation read-back", () => {
       [
         "#!/usr/bin/env node",
         'const { spawnSync } = require("node:child_process");',
-        'const args = process.argv.slice(2);',
+        "const args = process.argv.slice(2);",
         'if (args[0] === "dep") process.exit(0);',
         'const result = spawnSync("bd", args, { stdio: "inherit" });',
         "process.exit(result.status ?? 1);",
@@ -696,7 +718,7 @@ describe.skipIf(!BD_AVAILABLE)("BeadsStore mutation read-back", () => {
       [
         "#!/usr/bin/env node",
         'const { spawnSync } = require("node:child_process");',
-        'const args = process.argv.slice(2);',
+        "const args = process.argv.slice(2);",
         'if (args[0] === "update" && args.includes("--metadata") && args.some((arg) => arg.includes("\\"archived\\":true"))) process.exit(0);',
         'const result = spawnSync("bd", args, { stdio: "inherit" });',
         "process.exit(result.status ?? 1);",
@@ -709,7 +731,7 @@ describe.skipIf(!BD_AVAILABLE)("BeadsStore mutation read-back", () => {
       [
         "#!/usr/bin/env node",
         'const { spawnSync } = require("node:child_process");',
-        'const args = process.argv.slice(2);',
+        "const args = process.argv.slice(2);",
         'if (args[0] === "delete") process.exit(0);',
         'const result = spawnSync("bd", args, { stdio: "inherit" });',
         "process.exit(result.status ?? 1);",
@@ -722,7 +744,7 @@ describe.skipIf(!BD_AVAILABLE)("BeadsStore mutation read-back", () => {
       [
         "#!/usr/bin/env node",
         'const { spawnSync } = require("node:child_process");',
-        'const args = process.argv.slice(2);',
+        "const args = process.argv.slice(2);",
         'if (args[0] === "comment") process.exit(0);',
         'const result = spawnSync("bd", args, { stdio: "inherit" });',
         "process.exit(result.status ?? 1);",
@@ -754,15 +776,21 @@ describe.skipIf(!BD_AVAILABLE)("BeadsStore mutation read-back", () => {
           title: "created with a dependency",
           deps: [{ type: "blocked-by", id: "rb-a2" }],
         }),
-      ).rejects.toMatchObject({ message: expect.stringContaining("dependencies") });
+      ).rejects.toMatchObject({
+        message: expect.stringContaining("dependencies"),
+      });
       await expect(
         noopDeps.addDep("rb-a1", { type: "blocked-by", id: "rb-a2" }),
-      ).rejects.toMatchObject({ message: expect.stringContaining("dependencies") });
+      ).rejects.toMatchObject({
+        message: expect.stringContaining("dependencies"),
+      });
 
       await bl.store.addDep("rb-a1", { type: "blocked-by", id: "rb-a2" });
       await expect(
         noopDeps.removeDep("rb-a1", { type: "blocked-by", id: "rb-a2" }),
-      ).rejects.toMatchObject({ message: expect.stringContaining("dependencies") });
+      ).rejects.toMatchObject({
+        message: expect.stringContaining("dependencies"),
+      });
       expect((await bl.store.get("rb-a1"))?.deps).toEqual([
         { type: "blocked-by", id: "rb-a2" },
       ]);
@@ -808,10 +836,91 @@ describe.skipIf(!BD_AVAILABLE)("BeadsStore mutation read-back", () => {
           archiveBody: true,
         }),
       ).rejects.toMatchObject({
-        message: expect.stringContaining("did not preserve the superseded body"),
+        message: expect.stringContaining(
+          "did not preserve the superseded body",
+        ),
       });
       expect((await bl.store.get("rb-c1"))?.body).toBe("original body");
       expect(readdirSync(bl.dir)).not.toContain("note-archive.md");
+    },
+    IT_TIMEOUT,
+  );
+
+  it(
+    "verifies the archive comment even when a note archive is configured",
+    async () => {
+      await bl.store.create({
+        id: "rb-c2",
+        title: "body preservation with a note archive",
+        body: "original body",
+      });
+      const noteArchivePath = join(bl.dir, "rb-note-archive.md");
+      const noopComment = new BeadsStore({
+        dir: bl.dir,
+        bin: commentWrapper,
+        noteArchivePath,
+        now: () => "2026-07-01",
+      });
+
+      await expect(
+        noopComment.update("rb-c2", {
+          body: "replacement body",
+          archiveBody: true,
+        }),
+      ).rejects.toMatchObject({
+        message: expect.stringContaining(
+          "did not preserve the superseded body",
+        ),
+      });
+      const fresh = new BeadsStore({ dir: bl.dir, now: () => "2026-07-01" });
+      expect((await fresh.get("rb-c2"))?.body).toBe("original body");
+      expect(readdirSync(bl.dir)).not.toContain("rb-note-archive.md");
+    },
+    IT_TIMEOUT,
+  );
+
+  it(
+    "rejects an unsaved archive comment even when an older comment contains the body",
+    async () => {
+      await bl.store.create({
+        id: "rb-c5",
+        title: "body preserved by the exact comment",
+        body: "not done yet",
+      });
+      await bl.store.update("rb-c5", { body: "done", archiveBody: true });
+      const noopComment = new BeadsStore({
+        dir: bl.dir,
+        bin: commentWrapper,
+        now: () => "2026-07-02",
+      });
+
+      await expect(
+        noopComment.update("rb-c5", { body: "final", archiveBody: true }),
+      ).rejects.toMatchObject({
+        message: expect.stringContaining(
+          "did not preserve the superseded body",
+        ),
+      });
+      const fresh = new BeadsStore({ dir: bl.dir, now: () => "2026-07-01" });
+      expect((await fresh.get("rb-c5"))?.body).toBe("done");
+    },
+    IT_TIMEOUT,
+  );
+
+  it(
+    "archives a multi-line body without a mirror",
+    async () => {
+      const body = 'first line\nsecond "quoted" line';
+      await bl.store.create({ id: "rb-c3", title: "multi-line", body });
+      const mirrorless = new BeadsStore({
+        dir: bl.dir,
+        now: () => "2026-07-01",
+      });
+      await mirrorless.update("rb-c3", {
+        body: "replacement body",
+        archiveBody: true,
+      });
+      expect((await mirrorless.get("rb-c3"))?.body).toBe("replacement body");
     },
     IT_TIMEOUT,
   );
@@ -830,7 +939,9 @@ describe.skipIf(!BD_AVAILABLE)("BeadsStore mutation read-back", () => {
 
       await expect(
         noopArchive.prune({ state: "done", keep: 0, archive: true }),
-      ).rejects.toMatchObject({ message: expect.stringContaining("did not archive rb-p1") });
+      ).rejects.toMatchObject({
+        message: expect.stringContaining("did not archive rb-p1"),
+      });
       expect(await bl.store.get("rb-p1")).not.toBeNull();
       expect(readdirSync(bl.dir)).not.toContain("read-back-archive.md");
     },
@@ -907,6 +1018,118 @@ describe.skipIf(!BD_AVAILABLE)("BeadsStore maintenance and mirror", () => {
   );
 
   it(
+    "refuses to overwrite a mirror path holding a file it did not generate",
+    async () => {
+      const backlog = join(bl.dir, "existing-backlog.md");
+      const original = "# Backlog\n\n## Queued\n\n- [ ] keep-k1 - not in bd\n";
+      writeFileSync(backlog, original, "utf8");
+      const store = new BeadsStore({
+        dir: bl.dir,
+        mirrorPath: backlog,
+        now: () => "2026-07-01",
+      });
+      for (const write of [
+        () => store.create({ id: "guard-g1", title: "would clobber" }),
+        () => store.render(),
+      ]) {
+        await expect(write()).rejects.toMatchObject({
+          code: "VALIDATION_ERROR",
+          message: expect.stringContaining(backlog),
+        });
+      }
+      expect(readFileSync(backlog, "utf8")).toBe(original);
+      expect(await bl.store.get("guard-g1")).toBeNull();
+
+      writeFileSync(backlog, "", "utf8");
+      expect(await store.render()).toBeGreaterThan(0);
+      expect(parseBacklog(readFileSync(backlog, "utf8")).sections).toHaveLength(
+        3,
+      );
+      await expect(store.render()).resolves.toBeGreaterThan(0);
+    },
+    IT_TIMEOUT,
+  );
+
+  it.skipIf(process.platform === "win32")(
+    "does not report a bd failure as LOCKED because the task id contains lock",
+    async () => {
+      await bl.store.create({ id: "ci-lock-a1", title: "raced away" });
+      // A raw `bd delete` racing the transition: bd's error echoes the id.
+      const wrapper = join(bl.dir, "bd-race-delete.cjs");
+      writeFileSync(
+        wrapper,
+        [
+          "#!/usr/bin/env node",
+          'const { spawnSync } = require("node:child_process");',
+          "const args = process.argv.slice(2);",
+          'if (args[0] === "update") spawnSync("bd", ["delete", args[1], "-f"], { stdio: "ignore" });',
+          'const r = spawnSync("bd", args, { stdio: "inherit" });',
+          "process.exit(r.status ?? 1);",
+          "",
+        ].join("\n"),
+        "utf8",
+      );
+      chmodSync(wrapper, 0o755);
+      const racing = new BeadsStore({
+        dir: bl.dir,
+        bin: wrapper,
+        now: () => "2026-07-01",
+      });
+      await expect(
+        racing.transition("ci-lock-a1", "in_flight"),
+      ).rejects.toMatchObject({ code: "UNKNOWN" });
+    },
+    IT_TIMEOUT,
+  );
+
+  // bd 1.3.4's failure while a maintenance operation holds the gate: plain
+  // text on stderr, or (under --json) an `{"error": ...}` object on stdout.
+  const gateBusy =
+    "a maintenance operation is running on this workspace; retry when it completes: " +
+    "workspacegate: /ws/.beads/embeddeddolt.gate.lock (shared mode) held by another bd process " +
+    "(no holder info recorded): workspace gate busy";
+  it.skipIf(process.platform === "win32").each([
+    ["stderr", "gate-g1", "process.stderr", `Error: ${gateBusy}\n`],
+    [
+      "--json stdout",
+      "gate-g2",
+      "process.stdout",
+      `${JSON.stringify({ error: gateBusy, schema_version: 1 }, null, 2)}\n`,
+    ],
+  ])(
+    "reports bd's workspace-gate contention on %s as LOCKED",
+    async (_form, id, stream, output) => {
+      await bl.store.create({ id, title: "maintenance running" });
+      const wrapper = join(bl.dir, "bd-gate-busy.cjs");
+      writeFileSync(
+        wrapper,
+        [
+          "#!/usr/bin/env node",
+          'const { spawnSync } = require("node:child_process");',
+          "const args = process.argv.slice(2);",
+          `if (args[0] === "update") { ${stream}.write(${JSON.stringify(output)}); process.exit(1); }`,
+          'const r = spawnSync("bd", args, { stdio: "inherit" });',
+          "process.exit(r.status ?? 1);",
+          "",
+        ].join("\n"),
+        "utf8",
+      );
+      chmodSync(wrapper, 0o755);
+      const gated = new BeadsStore({
+        dir: bl.dir,
+        bin: wrapper,
+        now: () => "2026-07-01",
+      });
+      const error = await gated
+        .transition(id, "in_flight")
+        .catch((e: unknown) => e);
+      expect(error).toMatchObject({ code: "LOCKED" });
+      expect((error as Error).message).toContain("workspace gate busy");
+    },
+    IT_TIMEOUT,
+  );
+
+  it(
     "reports a missing database as an actionable error",
     async () => {
       const dir = mkdtempSync(join(tmpdir(), "tasks-axi-nodb-"));
@@ -927,6 +1150,46 @@ describe.skipIf(!BD_AVAILABLE)("BeadsStore maintenance and mirror", () => {
       }
     },
     IT_TIMEOUT,
+  );
+
+  it(
+    "gives a bd init hint that works for a subdirectory of a git repo",
+    async () => {
+      const repo = mkdtempSync(join(tmpdir(), "tasks-axi-nodb-git-"));
+      try {
+        execFileSync("git", ["init", "-q"], { cwd: repo });
+        const dir = join(repo, "data");
+        mkdirSync(dir);
+        const store = new BeadsStore({ dir, prefix: "hint" });
+        const error = await store.list({}).then(
+          () => undefined,
+          (e: unknown) => e as AxiError,
+        );
+        const command = error?.suggestions?.join("\n").match(/`([^`]+)`/)?.[1];
+        expect(command).toBeDefined();
+        // Run the hint as a user would from inside `dir`.
+        const tokens = command!.split(" ");
+        const env: Record<string, string> = {};
+        while (/^[A-Z_]+=/.test(tokens[0]!)) {
+          const [key, ...value] = tokens.shift()!.split("=");
+          env[key!] = value.join("=");
+        }
+        const [bin, ...args] = tokens;
+        execFileSync(bin!, [...args, "--non-interactive"], {
+          cwd: dir,
+          env: { ...process.env, ...env },
+          stdio: "ignore",
+          timeout: 120_000,
+        });
+        expect(existsSync(join(dir, ".beads"))).toBe(true);
+        expect(existsSync(join(repo, ".beads"))).toBe(false);
+        await store.create({ id: "hint-a1", title: "after init" });
+        expect((await store.get("hint-a1"))?.title).toBe("after init");
+      } finally {
+        rmSync(repo, { recursive: true, force: true });
+      }
+    },
+    HOOK_TIMEOUT,
   );
 });
 
@@ -962,7 +1225,12 @@ describe.skipIf(!BD_AVAILABLE)("BeadsStore without a mirror", () => {
       for (const name of ["backlog.md", "done-archive.md", "note-archive.md"]) {
         expect(files).not.toContain(name);
       }
-      expect(files.filter((name) => name.endsWith(".lock"))).toEqual([]);
+      // bd >= 1.3 owns `.beads.gate.lock` at the workspace root.
+      expect(
+        files.filter(
+          (name) => name.endsWith(".lock") && name !== ".beads.gate.lock",
+        ),
+      ).toEqual([]);
       expect((await store.get("nm-a1"))?.body).toBe("curated");
       // The superseded body survives as a bd comment even with no file archive.
       const comments = execFileSync("bd", ["comments", "nm-a1", "--json"], {
@@ -1038,6 +1306,15 @@ describe.skipIf(!BD_AVAILABLE)("BeadsStore without a mirror", () => {
   );
 });
 
+/** Resolves once a store holds the workspace mutation lock under `dir`. */
+async function waitForWorkspaceLock(dir: string): Promise<void> {
+  const lock = join(dir, ".beads", "tasks-axi");
+  for (let i = 0; i < 2_000 && !isLocked(lock); i++) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  expect(isLocked(lock)).toBe(true);
+}
+
 describe.skipIf(!BD_AVAILABLE)("BeadsStore lock wait", () => {
   let bl: TempBeadsBacklog;
   beforeAll(() => {
@@ -1055,7 +1332,9 @@ describe.skipIf(!BD_AVAILABLE)("BeadsStore lock wait", () => {
         b.create({ id: "lk-b1", title: "from b" }),
         a.create({ id: "lk-a2", title: "also a" }),
       ]);
-      const ids = (await a.list({})).items.map((t) => t.id);
+      // A fresh store: `a`'s list cache predates whichever write landed last.
+      const fresh = new BeadsStore({ dir: bl.dir, now: () => "2026-07-01" });
+      const ids = (await fresh.list({})).items.map((t) => t.id);
       expect(ids).toEqual(expect.arrayContaining(["lk-a1", "lk-b1", "lk-a2"]));
     },
     IT_TIMEOUT * 3,
@@ -1064,17 +1343,16 @@ describe.skipIf(!BD_AVAILABLE)("BeadsStore lock wait", () => {
   it(
     "fails with LOCKED once a configured wait runs out",
     async () => {
-      const holder = new BeadsStore({ dir: bl.dir, now: () => "2026-07-01" });
       const impatient = new BeadsStore({
         dir: bl.dir,
         lockTimeoutMs: 50,
         now: () => "2026-07-01",
       });
-      const held = holder.create({ id: "lk-c1", title: "slow writer" });
-      await expect(
-        impatient.create({ id: "lk-c2", title: "gives up" }),
-      ).rejects.toMatchObject({ code: "LOCKED" });
-      await held;
+      await withLock(join(bl.dir, ".beads", "tasks-axi"), async () => {
+        await expect(
+          impatient.create({ id: "lk-c2", title: "gives up" }),
+        ).rejects.toMatchObject({ code: "LOCKED" });
+      });
       expect(await impatient.get("lk-c2")).toBeNull();
     },
     IT_TIMEOUT,
@@ -1089,7 +1367,7 @@ describe.skipIf(!BD_AVAILABLE)("BeadsStore lock wait", () => {
         [
           "#!/usr/bin/env node",
           'const { spawnSync } = require("node:child_process");',
-          'const args = process.argv.slice(2);',
+          "const args = process.argv.slice(2);",
           'if (args[0] === "create" && args.includes("ws-a1")) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 200);',
           'const result = spawnSync("bd", args, { stdio: "inherit" });',
           "process.exit(result.status ?? 1);",
@@ -1113,12 +1391,66 @@ describe.skipIf(!BD_AVAILABLE)("BeadsStore lock wait", () => {
       });
 
       const first = mirrorless.create({ id: "ws-a1", title: "slow" });
-      await new Promise((resolve) => setTimeout(resolve, 25));
+      await waitForWorkspaceLock(bl.dir);
       await expect(
         mirrored.create({ id: "ws-a2", title: "contender" }),
       ).rejects.toMatchObject({ code: "LOCKED" });
       await first;
       expect(await mirrorless.get("ws-a2")).toBeNull();
+    },
+    IT_TIMEOUT,
+  );
+
+  it.skipIf(process.platform === "win32")(
+    "locks the workspace bd resolves, whatever the caller's cwd",
+    async () => {
+      // A wrapper that pins the workspace, so the store is configured with no
+      // dir: callers from different directories must still share one lock.
+      const wrapper = join(bl.dir, "pinned-lock-bd.cjs");
+      writeFileSync(
+        wrapper,
+        [
+          "#!/usr/bin/env node",
+          'const { spawnSync } = require("node:child_process");',
+          "const r = spawnSync(",
+          '  "bd",',
+          "  process.argv.slice(2),",
+          "  {",
+          '    stdio: "inherit",',
+          `    cwd: ${JSON.stringify(bl.dir)},`,
+          `    env: { ...process.env, BEADS_DIR: ${JSON.stringify(join(bl.dir, ".beads"))} },`,
+          "  },",
+          ");",
+          "process.exit(r.status ?? 1);",
+          "",
+        ].join("\n"),
+        "utf8",
+      );
+      chmodSync(wrapper, 0o755);
+      const cwds = [
+        mkdtempSync(join(tmpdir(), "tasks-axi-cwd-a-")),
+        mkdtempSync(join(tmpdir(), "tasks-axi-cwd-b-")),
+      ];
+      const previous = process.cwd();
+      try {
+        await withLock(join(bl.dir, ".beads", "tasks-axi"), async () => {
+          for (const cwd of cwds) {
+            process.chdir(cwd);
+            const store = new BeadsStore({
+              bin: wrapper,
+              lockTimeoutMs: 50,
+              now: () => "2026-07-01",
+            });
+            await expect(
+              store.create({ id: "ws-cwd", title: "contender" }),
+            ).rejects.toMatchObject({ code: "LOCKED" });
+          }
+        });
+      } finally {
+        process.chdir(previous);
+        for (const cwd of cwds) rmSync(cwd, { recursive: true, force: true });
+      }
+      expect(await bl.store.get("ws-cwd")).toBeNull();
     },
     IT_TIMEOUT,
   );
@@ -1314,6 +1646,226 @@ describe.skipIf(!BD_AVAILABLE)("BeadsStore native beads", () => {
       expect(showJson("nat-bare").close_reason).toBe("Closed");
       expect(showJson("nat-blocked").close_reason).toBe("Closed");
       expect((await bl.store.get("nat-pr"))?.state).toBe("done");
+    },
+    IT_TIMEOUT,
+  );
+});
+
+describe.skipIf(!BD_AVAILABLE)("BeadsStore move to markdown", () => {
+  let bl: TempBeadsBacklog;
+  let targetDir: string;
+  beforeAll(() => {
+    bl = makeBeadsBacklog();
+    targetDir = mkdtempSync(join(tmpdir(), "tasks-axi-mv-target-"));
+  }, HOOK_TIMEOUT);
+  afterAll(() => {
+    bl.cleanup();
+    rmSync(targetDir, { recursive: true, force: true });
+  });
+
+  const makeTarget = (name: string): MarkdownStore => {
+    const path = join(targetDir, `${name}.md`);
+    writeFileSync(path, "# Backlog\n\n## In flight\n\n## Queued\n\n## Done\n");
+    return new MarkdownStore({ path, now: () => "2026-07-01" });
+  };
+
+  /** A bd wrapper that runs `onDelete` (a JS snippet) before any `delete`. */
+  const deleteWrapper = (name: string, onDelete: string): string => {
+    const wrapper = join(bl.dir, `${name}.cjs`);
+    writeFileSync(
+      wrapper,
+      [
+        "#!/usr/bin/env node",
+        'const { spawnSync } = require("node:child_process");',
+        'const fs = require("node:fs");',
+        "const args = process.argv.slice(2);",
+        `if (args[0] === "delete") { ${onDelete} }`,
+        'const result = spawnSync("bd", args, { stdio: "inherit" });',
+        "process.exit(result.status ?? 1);",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    chmodSync(wrapper, 0o755);
+    return wrapper;
+  };
+
+  const fresh = () => new BeadsStore({ dir: bl.dir, now: () => "2026-07-01" });
+
+  it(
+    "moves a task into a markdown backlog",
+    async () => {
+      await bl.store.create({ id: "mv-a1", title: "travels", body: "kept" });
+      const target = makeTarget("happy");
+      await bl.store.moveTo("mv-a1", target);
+      expect((await target.get("mv-a1"))?.body).toBe("kept");
+      expect(await fresh().get("mv-a1")).toBeNull();
+    },
+    IT_TIMEOUT,
+  );
+
+  it(
+    "moves through the mv command",
+    async () => {
+      await bl.store.create({ id: "mv-c1", title: "via the CLI" });
+      const target = makeTarget("cli");
+      const out = await mvCommand(
+        ["mv-c1", "--to", join(targetDir, "cli.md"), "--json"],
+        bl.ctx,
+      );
+      expect(JSON.parse(out)).toMatchObject({ ok: true, id: "mv-c1" });
+      expect(await target.get("mv-c1")).not.toBeNull();
+      expect(await fresh().get("mv-c1")).toBeNull();
+    },
+    IT_TIMEOUT,
+  );
+
+  it.skipIf(process.platform === "win32")(
+    "holds the destination lock until the source delete is verified",
+    async () => {
+      await bl.store.create({ id: "mv-l1", title: "locked move" });
+      const target = makeTarget("locked");
+      const marker = join(targetDir, "lock-seen");
+      const store = new BeadsStore({
+        dir: bl.dir,
+        bin: deleteWrapper(
+          "bd-delete-lock-probe",
+          `fs.writeFileSync(${JSON.stringify(marker)}, String(fs.existsSync(${JSON.stringify(join(targetDir, "locked.md.lock"))})));`,
+        ),
+        now: () => "2026-07-01",
+      });
+      await store.moveTo("mv-l1", target);
+      expect(readFileSync(marker, "utf8")).toBe("true");
+      expect(await target.get("mv-l1")).not.toBeNull();
+    },
+    IT_TIMEOUT,
+  );
+
+  it.skipIf(process.platform === "win32")(
+    "rolls the destination copy back when the source delete fails",
+    async () => {
+      await bl.store.create({ id: "mv-r1", title: "stays put" });
+      const target = makeTarget("rollback");
+      const store = new BeadsStore({
+        dir: bl.dir,
+        bin: deleteWrapper(
+          "bd-delete-fails",
+          'process.stderr.write("Error: delete refused\\n"); process.exit(1);',
+        ),
+        now: () => "2026-07-01",
+      });
+      await expect(store.moveTo("mv-r1", target)).rejects.toMatchObject({
+        message: expect.stringContaining("delete refused"),
+      });
+      expect(await target.get("mv-r1")).toBeNull();
+      expect(await fresh().get("mv-r1")).not.toBeNull();
+    },
+    IT_TIMEOUT,
+  );
+
+  it.skipIf(process.platform === "win32")(
+    "reports a duplicate when the destination rollback also fails",
+    async () => {
+      await bl.store.create({ id: "mv-d1", title: "lives in both" });
+      makeTarget("unrollable");
+      const targetPath = join(targetDir, "unrollable.md");
+      const target = new MarkdownStore({
+        path: targetPath,
+        now: () => "2026-07-01",
+      });
+      const store = new BeadsStore({
+        dir: bl.dir,
+        bin: deleteWrapper(
+          "bd-delete-breaks-target",
+          `fs.rmSync(${JSON.stringify(targetPath)}); fs.mkdirSync(${JSON.stringify(targetPath)}); process.stderr.write("Error: delete refused\\n"); process.exit(1);`,
+        ),
+        now: () => "2026-07-01",
+      });
+      await expect(store.moveTo("mv-d1", target)).rejects.toMatchObject({
+        code: "CONFLICT",
+        message: expect.stringContaining("exists in both backlogs"),
+        suggestions: expect.arrayContaining([
+          expect.stringContaining("delete refused"),
+        ]),
+      });
+      expect(await fresh().get("mv-d1")).not.toBeNull();
+    },
+    IT_TIMEOUT,
+  );
+
+  it(
+    "does not treat an unconfigured markdown path as the beads source",
+    async () => {
+      await bl.store.create({ id: "mv-u1", title: "default path is free" });
+      const targetPath = join(targetDir, "default-path.md");
+      const target = makeTarget("default-path");
+      const out = await mvCommand(["mv-u1", "--to", targetPath, "--json"], {
+        store: fresh(),
+        config: { backend: "beads", path: targetPath, doneKeep: 10 },
+      });
+      const parsed = JSON.parse(out) as Record<string, unknown>;
+      expect(parsed).toMatchObject({ ok: true, id: "mv-u1", to: targetPath });
+      expect(parsed).not.toHaveProperty("from");
+      expect(await target.get("mv-u1")).not.toBeNull();
+      expect(await fresh().get("mv-u1")).toBeNull();
+    },
+    IT_TIMEOUT,
+  );
+
+  it(
+    "refuses a --to that resolves to the configured beads mirror",
+    async () => {
+      await bl.store.create({ id: "mv-m1", title: "mirror is the source" });
+      await expect(
+        mvCommand(["mv-m1", "--to", bl.mirrorPath], bl.ctx),
+      ).rejects.toMatchObject({
+        code: "VALIDATION_ERROR",
+        message: "--to resolves to the current backlog",
+      });
+      expect(await fresh().get("mv-m1")).not.toBeNull();
+    },
+    IT_TIMEOUT,
+  );
+
+  it.skipIf(process.platform === "win32")(
+    "keeps the destination copy when the source is gone but a later step fails",
+    async () => {
+      await bl.store.create({ id: "mv-k1", title: "must not vanish" });
+      const target = makeTarget("kept");
+      // The mirror path turns into a directory during the delete, so the
+      // post-delete mirror write fails after bd has already deleted the source.
+      const mirrorDir = join(targetDir, "mirror-is-a-dir");
+      const store = new BeadsStore({
+        dir: bl.dir,
+        mirrorPath: mirrorDir,
+        bin: deleteWrapper(
+          "bd-delete-breaks-mirror",
+          `fs.mkdirSync(${JSON.stringify(join(mirrorDir, "occupied"))}, { recursive: true });`,
+        ),
+        now: () => "2026-07-01",
+      });
+      await expect(store.moveTo("mv-k1", target)).rejects.toBeInstanceOf(Error);
+      expect(await fresh().get("mv-k1")).toBeNull();
+      expect(await target.get("mv-k1")).not.toBeNull();
+    },
+    IT_TIMEOUT,
+  );
+
+  it(
+    "refuses a task that still blocks an active task",
+    async () => {
+      await bl.store.create({ id: "mv-b1", title: "blocker" });
+      await bl.store.create({
+        id: "mv-b2",
+        title: "dependent",
+        deps: [{ type: "blocked-by", id: "mv-b1" }],
+      });
+      const target = makeTarget("blocked");
+      await expect(bl.store.moveTo("mv-b1", target)).rejects.toMatchObject({
+        code: "VALIDATION_ERROR",
+      });
+      expect(await target.get("mv-b1")).toBeNull();
+      expect(await fresh().get("mv-b1")).not.toBeNull();
     },
     IT_TIMEOUT,
   );

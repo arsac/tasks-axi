@@ -1,0 +1,56 @@
+name: Fork release
+
+# Releases of this fork, which cannot publish to the upstream-owned npm name.
+# A tasks-axi-v<upstream>-beads.<n> tag builds and tests the tagged commit,
+# then attaches its `npm pack` tarball to a GitHub Release for installs by URL.
+# Build and test run read-only; only the publish job, which runs no third-party
+# code, gets write access.
+on:
+  push:
+    tags: ["tasks-axi-v*-beads.*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    if: github.event.repository.fork
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Tag matches package.json
+        run: test "tasks-axi-v$(node -p 'require("./package.json").version')" = "$GITHUB_REF_NAME"
+      - run: pnpm install --frozen-lockfile
+      - run: |
+          # @beads/bd's postinstall skips the binary download when CI is set.
+          env -u CI npm install -g --allow-scripts=@beads/bd @beads/bd@1.3.4
+          echo "REQUIRE_BD=1" >> "$GITHUB_ENV"
+          echo "BD_DISABLE_METRICS=1" >> "$GITHUB_ENV"
+      - run: pnpm run build
+      - run: pnpm run lint
+      - run: pnpm test
+      - run: pnpm run build:skill -- --check
+      - run: npm pack
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tarball
+          path: tasks-axi-*.tgz
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: tarball
+      - run: gh release create "$GITHUB_REF_NAME" tasks-axi-*.tgz --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}

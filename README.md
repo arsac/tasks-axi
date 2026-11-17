@@ -89,6 +89,7 @@ The common mutations are one short, low-token command:
 ```sh
 # add a task (the id is the caller-supplied join key; --mint generates one)
 tasks-axi add lavish-foo-q9 "fix summary toggle" --kind ship --repo lavish-axi --priority 2 --start
+tasks-axi add fj-bug-k2 "fix the login redirect" --issue https://forgejo.example.com/owner/repo/issues/12
 
 # move through the workflow
 tasks-axi start firstmate-lease-adopt
@@ -133,7 +134,7 @@ Active holds are excluded from `ready`; a hold with `--until YYYY-MM-DD` becomes
 Use `ready --include-held` to show dispatchable ready work and a separate `held` group with the hold reason, kind, and until date.
 Use `list --state held` or `list --fields held,hold_reason,hold_kind,hold_until` when you need to scan active hold state directly.
 Pass `--json` to any mutation for a machine-readable result object (`{ "ok": true, "action": …, "task": { … } }` or operation-specific result fields) instead of TOON, so an agent can confirm a write deterministically without a follow-up read.
-For `mv`, a single task returns `id`, while a multi-task move returns first-occurrence-ordered, deduplicated `ids`, plus `from` and `to`.
+For `mv`, a single task returns `id`, while a multi-task move returns first-occurrence-ordered, deduplicated `ids`, plus `to` and the source backlog path as `from` (omitted on the beads backend with no markdown path configured).
 
 Run `tasks-axi --help` for the command list, or `tasks-axi <command> --help` for per-command usage.
 
@@ -217,7 +218,7 @@ It gently formalizes the inline tags a backlog already uses as the canonical fie
 - `(kind: X)` - task kind, when not already implied by a leading `SHIP` / `SCOUT` / `DOCS-ONLY` / `PERSISTENT SECONDMATE` word
 - `(priority: 0-4)` - optional priority, also accepted through `add` / `update --priority`
 - `(hold: <reason>)`, `(hold-kind: captain|external|load|parked|future)`, `(hold-until: YYYY-MM-DD)` - structured dispatch holds written by `hold`
-- PR urls, `data/<id>/report.md` paths, and other `http(s)` urls - typed links
+- PR urls, GitHub and Forgejo issue urls (`.../issues/<n>`), `data/<id>/report.md` paths, and other `http(s)` urls - typed links (`pr`, `issue`, `report`, `doc`); `add` and `update` take `--pr`, `--issue`, and `--report` to append one
 
 `tasks-axi render` rewrites every id'd task into this canonical form; free-form lines are left untouched.
 Bare dependency edges render immediately after the title, while reason-bearing dependency edges render after the parenthetical tags so the reason stays attached to the edge on the next parse.
@@ -260,7 +261,7 @@ Backends sit behind a narrow `Store` interface, so they slot in without touching
 
 ### The beads backend
 
-`backend = "beads"` stores the backlog in a [beads](https://github.com/gastownhall/beads) issue database, driven through the `bd` CLI (`npm install -g @beads/bd`, then `bd init` in the workspace directory).
+`backend = "beads"` stores the backlog in a [beads](https://github.com/gastownhall/beads) issue database, driven through the `bd` CLI (`npm install -g --allow-scripts=@beads/bd @beads/bd`, then `bd init` for the workspace directory, as below).
 Beads becomes the source of truth: dependency graph, priorities, full history, and every bd-native view (`bd show`, `bd graph`, `bd list`) work on the same tasks.
 
 ```toml
@@ -274,8 +275,19 @@ prefix = "proj"            # issue-id prefix of the workspace; other ids are rej
 lock_timeout_ms = 30000    # how long a mutation waits for another's lock
 
 [markdown]
-path = "data/backlog.md"   # optional read-only mirror (see below)
+path = "data/beads-mirror.md"   # optional read-only mirror (see below)
 ```
+
+Initialize the workspace with `BEADS_DIR=<dir>/.beads bd init --stealth --skip-agents --skip-hooks --prefix <p>`.
+Set `BEADS_DIR` even when running inside `<dir>`: in a git repo a plain `bd init` creates `.beads/` at the repository root, where tasks-axi does not look.
+By default `bd init` writes agent instruction files (`AGENTS.md`, `CLAUDE.md`, `.claude/`, `.codex/`, `.cursor/`), installs git hooks, and commits them; these flags skip all of that and keep `.beads/` out of git through `.git/info/exclude`.
+bd also sends usage telemetry by default; set `BD_DISABLE_METRICS=1` in the environment that runs tasks-axi to turn it off.
+The backend is tested against bd 1.3.4, the version CI pins.
+
+Write tasks only through tasks-axi, and use bd and viewers such as [bv](https://github.com/Dicklesworthstone/beads_viewer) for reading (bv writes an untracked `.beads/issues.jsonl` that bd's gitignore does not cover).
+Raw `bd` writes skip the tasks-axi lock and the `tasks_axi` metadata, and `bd create --id <id> --force` silently overwrites an existing issue.
+`tasks-axi ready` is the dispatch queue: bd's own ready view only sees holds that carry an `--until` date.
+Never run a plain `bd github sync` on a tasks-axi workspace: it pushes every local issue, task bodies included, to the configured GitHub repository; use `bd github pull` if you want GitHub issues as tasks.
 
 Every `[beads]` key is optional.
 `bin` can be any executable that speaks bd's CLI, so a launcher script that pins its own workspace (for example by exporting `BEADS_DIR` and then `exec bd "$@"`) works with `dir` unset; tasks-axi then sets no `cwd` or `BEADS_DIR` and leaves workspace selection to the wrapper.
@@ -284,13 +296,15 @@ Issues created outside tasks-axi still read naturally: bd's priority (0-4), a no
 
 When `[markdown] path` (or `--file` / `TASKS_AXI_FILE`) is set, after every mutation the backend rewrites that path as a **read-only canonical mirror** of the active backlog, byte-compatible with the markdown backend's format, so tools that read `backlog.md` directly keep working unchanged.
 Hand-edits to the mirror are overwritten; mutate through tasks-axi (or `bd`, then `tasks-axi render` to refresh the mirror).
+To protect an existing markdown backlog, every mutation and `render` refuse with a `VALIDATION_ERROR` when the mirror path holds a non-empty file without the mirror's generated header; point the mirror at a separate file, since tasks already in that backlog are not imported into bd.
 tasks-axi fields that beads has no column for (kind, repo, holds, canonical dates, dependency reasons) live in a `tasks_axi` object inside each issue's metadata; a hold with `--until` also sets bd's defer date.
 With no mirror configured, nothing is written beside the workspace; `prune` archives surplus Done tasks to `done-archive.md` only when a mirror (or `[markdown] archive`) is set, and hides them from tasks-axi with a metadata flag while beads retains the full record.
 `--archive-body` always preserves the superseded body as a bd comment, so the history stays visible from bd-native views; when a mirror configures `note-archive.md`, it also writes the shared dated archive block there.
 `create`, `update`, and every state transition are verified by reading the task back from bd and comparing the persisted fields, so a bd invocation that exits 0 without applying the change surfaces as a structured error instead of silent divergence.
 bd stores one relationship type per task pair, so adding a `blocked-by` edge to an id that already carries a `parent` or `discovered-from` edge (or vice versa) fails with a `VALIDATION_ERROR` naming the existing edge; remove that edge first.
 `ready`/`blocked`/`held` stay derived by the CLI from the dependency graph, so they are correct even where `bd ready` itself is not (bd 1.2.2 mis-reads blockers on issues whose id prefix differs from the database prefix).
-tasks-axi mutations serialize under an advisory lock (on the mirror path, or a temp file keyed to the binary and workspace when there is no mirror) and wait up to `lock_timeout_ms` (default 30 s, above one mutation) before failing closed with a `LOCKED` error, so parallel agents queue instead of retrying; raw `bd` writers bypass that lock, and `bd create --id <id> --force` silently overwrites an existing issue, so create ids through tasks-axi when both are in play.
+tasks-axi mutations serialize under an advisory lock, `tasks-axi.lock` inside the `.beads` directory that `bd where` reports, so every caller of one workspace shares it whatever its directory, wrapper or `TMPDIR`, and wait up to `lock_timeout_ms` (default 30 s, above one mutation) before failing closed with a `LOCKED` error, so parallel agents queue instead of retrying; raw `bd` writers bypass that lock (see above).
+Single-task `mv` moves a beads task into a markdown backlog while holding both the workspace lock and the destination backlog's lock, so neither copy can gain a dependent mid-move. A failed delete rolls the markdown copy back; if the source is already gone when a later step fails, the copy is kept and the error reported, so a move can leave a duplicate but never loses a task.
 Public-followups and multi-task `mv` are not supported on this backend.
 
 ## Development

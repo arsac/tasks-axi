@@ -1,7 +1,7 @@
 import { AxiError } from "../errors.js";
 import type { Dep, Hold, HoldKind, State, Task, TaskLink } from "../model.js";
 import { HOLD_KINDS } from "../model.js";
-import { isPrUrl } from "../pr-url.js";
+import { isIssueUrl, isPrUrl } from "../pr-url.js";
 import {
   PUBLIC_FOLLOWUP_KIND,
   assertPublicFollowupTaskState,
@@ -165,9 +165,13 @@ export function deriveLinks(text: string): TaskLink[] {
   for (const m of text.matchAll(GENERIC_URL)) {
     if (isPrUrl(trimUrl(m[0]))) add("pr", m[0]);
   }
+  for (const m of text.matchAll(GENERIC_URL)) {
+    if (isIssueUrl(trimUrl(m[0]))) add("issue", m[0]);
+  }
   for (const m of text.matchAll(REPORT_LINK)) add("report", m[0]);
   for (const m of text.matchAll(GENERIC_URL)) {
-    if (!isPrUrl(trimUrl(m[0]))) add("doc", m[0]);
+    const url = trimUrl(m[0]);
+    if (!isPrUrl(url) && !isIssueUrl(url)) add("doc", m[0]);
   }
   return links;
 }

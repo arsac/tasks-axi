@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { isPrUrl } from "../src/pr-url.js";
+import { isIssueUrl, isPrUrl } from "../src/pr-url.js";
 
 describe("isPrUrl", () => {
   it.each([
@@ -48,5 +48,34 @@ describe("isPrUrl", () => {
     "https://forgejo.samesies.gay/o/../pulls/39",
   ])("rejects non-canonical URL %j", (url) => {
     expect(isPrUrl(url)).toBe(false);
+  });
+});
+
+describe("isIssueUrl", () => {
+  it.each([
+    "https://github.com/o/r/issues/42",
+    "https://forgejo.samesies.gay/eve/orchalycious/issues/39",
+    "https://codeberg.org/forgejo/forgejo/issues/1234",
+  ])("accepts canonical issue URL %s", (url) => {
+    expect(isIssueUrl(url)).toBe(true);
+  });
+
+  it.each([
+    "https://github.com/o/r/pull/42",
+    "https://forgejo.samesies.gay/o/r/pulls/42",
+    "https://github.com/o/r/issue/42",
+    "https://github.com/o/r/issues/0",
+    "https://github.com/o/r/issues/042",
+    "http://github.com/o/r/issues/42",
+    "https://github.com/o/r/issues/42/",
+    "https://github.com/o/r/issues/42#issuecomment-1",
+    "https://github.com/o/r/issues/42?x=1",
+    "https://user@github.com/o/r/issues/42",
+    "https://forgejo.samesies.gay:8443/o/r/issues/42",
+    "https://Forgejo.Samesies.Gay/o/r/issues/42",
+    "https://forgejo.samesies.gay/o/r/extra/issues/42",
+    "https://forgejo.samesies.gay/../r/issues/42",
+  ])("rejects non-canonical URL %j", (url) => {
+    expect(isIssueUrl(url)).toBe(false);
   });
 });

@@ -36,8 +36,10 @@ jobs:
       # broken bd install or PATH regression cannot silently drop coverage.
       - if: runner.os == 'Linux'
         run: |
-          npm install -g @beads/bd@1.2.2
+          # @beads/bd's postinstall skips the binary download when CI is set.
+          env -u CI npm install -g --allow-scripts=@beads/bd @beads/bd@1.3.4
           echo "REQUIRE_BD=1" >> "$GITHUB_ENV"
+          echo "BD_DISABLE_METRICS=1" >> "$GITHUB_ENV"
       - run: pnpm run build
       - run: pnpm run lint
       - run: pnpm test

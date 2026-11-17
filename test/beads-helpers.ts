@@ -63,7 +63,12 @@ export function makeBeadsBacklog(now = "2026-07-01"): TempBeadsBacklog {
   const store = new BeadsStore({ dir, mirrorPath, now: () => now });
   const ctx: TasksContext = {
     store,
-    config: { backend: "beads", path: mirrorPath, doneKeep: 10 },
+    config: {
+      backend: "beads",
+      path: mirrorPath,
+      pathConfigured: true,
+      doneKeep: 10,
+    },
   };
   const readSafe = (path: string) => {
     try {
