@@ -1362,13 +1362,20 @@ describe.skipIf(!BD_AVAILABLE)("BeadsStore lock wait", () => {
     "shares one lock between mirrored and mirrorless workspace views",
     async () => {
       const wrapper = join(bl.dir, "slow-create.cjs");
+      const release = join(bl.dir, "slow-create.release");
+      // The slow create holds the workspace lock until the test releases it,
+      // so the contender's own bd startup time cannot outlast the hold.
       writeFileSync(
         wrapper,
         [
           "#!/usr/bin/env node",
+          'const { existsSync } = require("node:fs");',
           'const { spawnSync } = require("node:child_process");',
           "const args = process.argv.slice(2);",
-          'if (args[0] === "create" && args.includes("ws-a1")) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 200);',
+          'if (args[0] === "create" && args.includes("ws-a1")) {',
+          "  const sleep = new Int32Array(new SharedArrayBuffer(4));",
+          `  for (let i = 0; i < 3000 && !existsSync(${JSON.stringify(release)}); i++) Atomics.wait(sleep, 0, 0, 10);`,
+          "}",
           'const result = spawnSync("bd", args, { stdio: "inherit" });',
           "process.exit(result.status ?? 1);",
           "",
@@ -1391,11 +1398,15 @@ describe.skipIf(!BD_AVAILABLE)("BeadsStore lock wait", () => {
       });
 
       const first = mirrorless.create({ id: "ws-a1", title: "slow" });
-      await waitForWorkspaceLock(bl.dir);
-      await expect(
-        mirrored.create({ id: "ws-a2", title: "contender" }),
-      ).rejects.toMatchObject({ code: "LOCKED" });
-      await first;
+      try {
+        await waitForWorkspaceLock(bl.dir);
+        await expect(
+          mirrored.create({ id: "ws-a2", title: "contender" }),
+        ).rejects.toMatchObject({ code: "LOCKED" });
+      } finally {
+        writeFileSync(release, "", "utf8");
+        await first;
+      }
       expect(await mirrorless.get("ws-a2")).toBeNull();
     },
     IT_TIMEOUT,
