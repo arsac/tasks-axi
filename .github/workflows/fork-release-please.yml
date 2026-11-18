@@ -76,7 +76,7 @@ jobs:
       # release as a prerelease, which GitHub's latest link skips.
       - run: |
           cp tasks-axi-*.tgz tasks-axi.tgz
-          gh release upload "$TAG" tasks-axi-*.tgz tasks-axi.tgz --repo "$GITHUB_REPOSITORY"
+          gh release upload "$TAG" tasks-axi-*.tgz tasks-axi.tgz --clobber --repo "$GITHUB_REPOSITORY"
           gh release edit "$TAG" --prerelease=false --latest --repo "$GITHUB_REPOSITORY"
         env:
           GH_TOKEN: ${{ github.token }}
