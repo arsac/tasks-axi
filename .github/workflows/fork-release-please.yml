@@ -70,7 +70,14 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: tarball
-      - run: gh release upload "$TAG" tasks-axi-*.tgz --repo "$GITHUB_REPOSITORY"
+      # A fixed-name copy plus the "latest" flag give installs one stable URL,
+      # releases/latest/download/tasks-axi.tgz. release-please's prerelease
+      # setting (needed for the -beads.<n> suffix) would otherwise mark the
+      # release as a prerelease, which GitHub's latest link skips.
+      - run: |
+          cp tasks-axi-*.tgz tasks-axi.tgz
+          gh release upload "$TAG" tasks-axi-*.tgz tasks-axi.tgz --repo "$GITHUB_REPOSITORY"
+          gh release edit "$TAG" --prerelease=false --latest --repo "$GITHUB_REPOSITORY"
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.release-please.outputs.tag_name }}
